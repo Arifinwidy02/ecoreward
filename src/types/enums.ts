@@ -40,6 +40,13 @@ export enum RewardType {
   OTHER = 'other',
 }
 
+export enum DepositIntentStatus {
+  PENDING = 'pending',
+  MATCHED = 'matched',
+  EXPIRED = 'expired',
+  CANCELLED = 'cancelled',
+}
+
 export enum NotificationType {
   BIN_FULL = 'bin_full',
   WASTE_PROCESSED = 'waste_processed',

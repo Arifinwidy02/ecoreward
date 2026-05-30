@@ -16,12 +16,13 @@ INSERT INTO public.achievements (name, description, icon_name, criteria) VALUES
   ('Sultan Sampah','Total 1000 kg sampah',           'gem',          '{"type":"total_kg","threshold":1000}'),
   ('Penjaga Bumi', '30 hari streak',                 'earth',        '{"type":"streak_days","threshold":30}');
 
-INSERT INTO public.smart_netbins (name, latitude, longitude, capacity_percent, status, address) VALUES
-  ('Netbin A - Balai Desa',       -6.91234, 107.61234, 30, 'available',   'Jl. Sarimukti No. 1, Desa Sarimukti'),
-  ('Netbin B - Pasar Sarimukti',  -6.91345, 107.61345, 85, 'almost_full', 'Pasar Tradisional Sarimukti'),
-  ('Netbin C - Pos RT 03',        -6.91456, 107.61111, 45, 'available',   'Pos RT 03, Kampung Cipanas'),
-  ('Netbin D - Dekat TPA',        -6.91000, 107.61500, 100,'full',        'Gerbang TPA Sarimukti'),
-  ('Netbin E - Sekolah Dasar',    -6.91500, 107.61400, 10, 'available',   'SDN Sarimukti 1');
+INSERT INTO public.smart_netbins (id, hardware_id, name, latitude, longitude, capacity_percent, status, address) VALUES
+  ('11111111-1111-1111-1111-111111111111', 'EcoReward01', 'Netbin A - Balai Desa',       -6.91234, 107.61234, 30, 'available',   'Jl. Sarimukti No. 1, Desa Sarimukti'),
+  ('22222222-2222-2222-2222-222222222222', 'EcoReward02', 'Netbin B - Pasar Sarimukti',  -6.91345, 107.61345, 85, 'almost_full', 'Pasar Tradisional Sarimukti'),
+  ('33333333-3333-3333-3333-333333333333', 'EcoReward03', 'Netbin C - Pos RT 03',        -6.91456, 107.61111, 45, 'available',   'Pos RT 03, Kampung Cipanas'),
+  ('44444444-4444-4444-4444-444444444444', 'EcoReward04', 'Netbin D - Dekat TPA',        -6.91000, 107.61500, 100,'full',        'Gerbang TPA Sarimukti'),
+  ('55555555-5555-5555-5555-555555555555', 'EcoReward05', 'Netbin E - Sekolah Dasar',    -6.91500, 107.61400, 10, 'available',   'SDN Sarimukti 1')
+ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO public.rewards (name, description, points_cost, type, stock, image_url) VALUES
   ('Saldo OVO Rp 10.000',  'Tukar poin dengan saldo OVO',           500,  'money',      -1, NULL),

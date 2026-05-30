@@ -1,4 +1,4 @@
-import React, {useEffect, useState, useMemo} from 'react';
+import React, {useEffect, useState, useMemo, useRef} from 'react';
 import {
   View,
   Text,
@@ -10,13 +10,20 @@ import {
 import {useRoute, useNavigation, RouteProp} from '@react-navigation/native';
 import {ScanStackParamList} from '../types/navigation';
 import {WasteCategory, SmartNetbin} from '../types/models';
-import {BinStatus, WasteCategoryName} from '../types/enums';
+import {
+  BinStatus,
+  DepositIntentStatus,
+  WasteCategoryName,
+} from '../types/enums';
 import {useAuthStore} from '../stores/useAuthStore';
 import {useUserStore} from '../stores/useUserStore';
 import {useBinStore} from '../stores/useBinStore';
-import {getAllCategories} from '../services/categoryService';
-import {submitScan} from '../services/scanService';
-import {supabase} from '../services/supabase';
+import {getAllCategories, getCategoryByName} from '../services/categoryService';
+import {
+  submitScan,
+  createDepositIntent,
+  pollDepositIntent,
+} from '../services/scanService';
 import {calculateEstimatedPoints} from '../utils/pointsCalculator';
 import {ScanResultCard} from '../components/scan/ScanResultCard';
 import {CategorySelector} from '../components/scan/CategorySelector';
@@ -89,34 +96,37 @@ const ALL_FALLBACK_CATEGORIES = Object.values(FALLBACK_CATEGORIES);
 const DUMMY_BINS: SmartNetbin[] = [
   {
     id: 'dummy-bin-1',
-    name: 'Smart Bin A - Depan Minimarket',
-    latitude: -6.9147,
-    longitude: 107.6098,
+    hardware_id: null,
+    name: 'Netbin A - Balai Desa (DUMMY)',
+    latitude: -6.91234,
+    longitude: 107.61234,
     capacity_percent: 35,
     status: BinStatus.AVAILABLE,
-    address: 'Jl. Raya No. 10',
+    address: 'Jl. Sarimukti No. 1, Desa Sarimukti',
     last_updated: new Date().toISOString(),
     created_at: new Date().toISOString(),
   },
   {
     id: 'dummy-bin-2',
-    name: 'Smart Bin B - Taman Kota',
-    latitude: -6.9175,
-    longitude: 107.612,
+    hardware_id: null,
+    name: 'Netbin B - Pasar Sarimukti',
+    latitude: -6.91345,
+    longitude: 107.61345,
     capacity_percent: 60,
     status: BinStatus.AVAILABLE,
-    address: 'Taman Kota, Area Timur',
+    address: 'Pasar Tradisional Sarimukti',
     last_updated: new Date().toISOString(),
     created_at: new Date().toISOString(),
   },
   {
     id: 'dummy-bin-3',
-    name: 'Smart Bin C - Dekat Halte Bus',
-    latitude: -6.92,
-    longitude: 107.605,
+    hardware_id: null,
+    name: 'Netbin C - Pos RT 03',
+    latitude: -6.91456,
+    longitude: 107.61111,
     capacity_percent: 15,
     status: BinStatus.AVAILABLE,
-    address: 'Halte Bus Transit',
+    address: 'Pos RT 03, Kampung Cipanas',
     last_updated: new Date().toISOString(),
     created_at: new Date().toISOString(),
   },
@@ -138,16 +148,18 @@ export function ScanResultScreen() {
     classification.confidence < MIN_CONFIDENCE_THRESHOLD,
   );
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isWaitingSensor, setIsWaitingSensor] = useState(false);
+  const [categoriesFromDb, setCategoriesFromDb] = useState(false);
+  const [binsFromDb, setBinsFromDb] = useState(false);
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const availableBins = useMemo(() => {
     const dbBins = bins.filter(b => b.status !== 'maintenance');
-    const combined = [...dbBins];
-    for (const dummy of DUMMY_BINS) {
-      if (!combined.find(b => b.id === dummy.id)) {
-        combined.push(dummy);
-      }
+    setBinsFromDb(dbBins.length > 0);
+    if (dbBins.length > 0) {
+      return dbBins;
     }
-    return combined;
+    return DUMMY_BINS;
   }, [bins]);
 
   useEffect(() => {
@@ -158,19 +170,26 @@ export function ScanResultScreen() {
     }
     loadBins();
     fetchCategories();
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+      }
+    };
   }, []);
 
   const fetchCategories = async () => {
     try {
       const cats = await getAllCategories();
+      console.log('🚀 ~ fetchCategories ~ cats:', cats);
       if (cats.length > 0) {
         setCategories(cats);
-        const matched = cats.find(
-          (c: WasteCategory) => c.name === classification.category,
-        );
-        if (matched) {
-          setSelectedCategory(matched);
-        }
+        setCategoriesFromDb(true);
+        setSelectedCategory(prev => {
+          console.log('🚀 ~ fetchCategories ~ prev:', prev);
+          if (!prev) return null;
+          const dbMatch = cats.find(c => c.name === prev.name);
+          return dbMatch || prev;
+        });
       }
     } catch (err) {
       console.warn(
@@ -185,6 +204,9 @@ export function ScanResultScreen() {
     setIsAIUnsure(false);
   };
 
+  const isUuid = (id: string) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
   const handleConfirm = async () => {
     if (!selectedCategory || !selectedBinId) {
       Alert.alert(
@@ -195,90 +217,208 @@ export function ScanResultScreen() {
     }
 
     const userId = session?.user?.id || 'dummy-user-id';
+    const {points, weightKg} = calculateEstimatedPoints(selectedCategory);
 
-    setIsSubmitting(true);
-    try {
-      const {points, weightKg} = calculateEstimatedPoints(selectedCategory);
-      console.log('🚀 ~ handleConfirm ~ selectedCategory:', selectedCategory);
-
-      const {data: sessionData, error: sessionErr} =
-        await supabase.auth.getSession();
-      console.log(
-        '[ScanResult] Supabase session check:',
-        sessionData?.session ? 'authenticated' : 'no session',
-        sessionErr?.message || '',
+    // Resolve real DB category UUID (fallback IDs like "fallback-organic" are not valid UUIDs)
+    let categoryId = selectedCategory.id;
+    if (!isUuid(categoryId)) {
+      // Try from loaded categories first
+      const fromLoaded = categories.find(
+        c => c.name === selectedCategory.name && isUuid(c.id),
       );
+      if (fromLoaded) {
+        categoryId = fromLoaded.id;
+      } else {
+        // Last resort: query DB directly
+        console.log('[ScanResult] Resolving category by name...');
+        const dbCat = await getCategoryByName(selectedCategory.name);
+        if (dbCat) {
+          categoryId = dbCat.id;
+          setSelectedCategory(dbCat);
+          setCategories(prev => {
+            const exists = prev.find(
+              c => c.name === dbCat.name && isUuid(c.id),
+            );
+            return exists
+              ? prev
+              : [...prev.filter(c => c.name !== dbCat.name), dbCat];
+          });
+        }
+      }
+    }
 
+    console.log(
+      '[ScanResult] categoryId:',
+      categoryId,
+      'isUuid:',
+      isUuid(categoryId),
+      'binId:',
+      selectedBinId,
+      'isUuid:',
+      isUuid(selectedBinId),
+    );
+
+    // Try intent flow only if both bin and category have real DB UUIDs
+    if (isUuid(selectedBinId) && isUuid(categoryId)) {
+      setIsSubmitting(true);
       try {
-        console.log('[ScanResult] Submitting scan to Supabase...');
-        console.log(
-          '[ScanResult] Payload:',
-          JSON.stringify({
-            userId,
-            binId: selectedBinId,
-            category: selectedCategory.name,
-            confidence: classification.confidence,
-            pointsEarned: points,
-            weightKg,
-          }),
-        );
-        const result = await submitScan({
+        const intent = await createDepositIntent({
           userId,
           binId: selectedBinId,
-          category: selectedCategory.name,
+          categoryId,
+          estimatedWeightKg: weightKg,
+          maxExpectedWeightKg: 20,
+          photoUri: imageUri,
+        });
+        console.log('[ScanResult] Intent created:', intent.id);
+        setIsSubmitting(false);
+        setIsWaitingSensor(true);
+        startPolling(intent.id);
+        return;
+      } catch (intentErr: any) {
+        console.warn(
+          '[ScanResult] Intent creation failed, falling back to direct:',
+          intentErr.message,
+        );
+      }
+    }
+
+    // Fallback: direct submit
+    await directSubmit(userId, points, weightKg);
+  };
+
+  const startPolling = (intentId: string) => {
+    const startTime = Date.now();
+    const maxWaitMs = 15000;
+
+    pollingRef.current = setInterval(async () => {
+      try {
+        const intent = await pollDepositIntent(intentId);
+
+        if (intent.status === DepositIntentStatus.MATCHED) {
+          clearInterval(pollingRef.current!);
+          setIsWaitingSensor(false);
+          await loadProfile(session?.user?.id || 'dummy-user-id');
+
+          Alert.alert(
+            'Deposit Terverifikasi!',
+            `Sensor mendeteksi sampah kamu!\n+${
+              calculateEstimatedPoints(selectedCategory!).points
+            } Eco-Points\nBin: ${
+              availableBins.find(b => b.id === selectedBinId)?.name ||
+              selectedBinId
+            }`,
+            [
+              {
+                text: 'OK',
+                onPress: () => {
+                  navigation.popToTop?.();
+                  navigation.getParent()?.navigate('HomeTab');
+                },
+              },
+            ],
+          );
+          return;
+        }
+
+        if (
+          intent.status === DepositIntentStatus.EXPIRED ||
+          intent.status === DepositIntentStatus.CANCELLED
+        ) {
+          clearInterval(pollingRef.current!);
+          setIsWaitingSensor(false);
+          const userId = session?.user?.id || 'dummy-user-id';
+          const {points: p, weightKg: w} = calculateEstimatedPoints(
+            selectedCategory!,
+          );
+          await directSubmit(userId, p, w);
+          return;
+        }
+
+        if (Date.now() - startTime > maxWaitMs) {
+          clearInterval(pollingRef.current!);
+          setIsWaitingSensor(false);
+          const userId = session?.user?.id || 'dummy-user-id';
+          const {points: p, weightKg: w} = calculateEstimatedPoints(
+            selectedCategory!,
+          );
+          await directSubmit(userId, p, w);
+        }
+      } catch (err: any) {
+        console.warn('[ScanResult] Polling error:', err.message);
+      }
+    }, 2000);
+  };
+
+  const directSubmit = async (
+    userId: string,
+    points: number,
+    weightKg: number,
+  ) => {
+    setIsWaitingSensor(false);
+    setIsSubmitting(true);
+    try {
+      console.log(
+        '[ScanResult] Payload:',
+        JSON.stringify({
+          userId,
+          binId: selectedBinId,
+          category: selectedCategory?.name,
           confidence: classification.confidence,
           pointsEarned: points,
           weightKg,
-          photoUri: imageUri,
-        });
-        console.log(
-          '[ScanResult] Scan submitted successfully:',
-          JSON.stringify(result),
-        );
-        await loadProfile(userId);
-      } catch (supabaseErr: any) {
-        console.error(
-          '[ScanResult] Supabase error:',
-          JSON.stringify(
-            {
-              message: supabaseErr.message,
-              code: supabaseErr.code,
-              details: supabaseErr.details,
-              hint: supabaseErr.hint,
-            },
-            null,
-            2,
-          ),
-        );
-        console.warn('[ScanResult] Supabase unavailable, using local state');
-        addPointsLocal(points, weightKg);
-      }
-
-      Alert.alert(
-        'Deposit Berhasil!',
-        `+${points} Eco-Points telah ditambahkan.\nKategori: ${
-          selectedCategory.name
-        }\nBin: ${
-          availableBins.find(b => b.id === selectedBinId)?.name || selectedBinId
-        }`,
-        [
+        }),
+      );
+      const result = await submitScan({
+        userId,
+        binId: selectedBinId!,
+        category: selectedCategory!.name,
+        confidence: classification.confidence,
+        pointsEarned: points,
+        weightKg,
+        photoUri: imageUri,
+      });
+      console.log(
+        '[ScanResult] Scan submitted successfully:',
+        JSON.stringify(result),
+      );
+      await loadProfile(userId);
+    } catch (supabaseErr: any) {
+      console.error(
+        '[ScanResult] Supabase error:',
+        JSON.stringify(
           {
-            text: 'OK',
-            onPress: () => {
-              navigation.popToTop();
-              navigation.getParent()?.navigate('HomeTab');
-            },
+            message: supabaseErr.message,
+            code: supabaseErr.code,
+            details: supabaseErr.details,
+            hint: supabaseErr.hint,
           },
-        ],
+          null,
+          2,
+        ),
       );
-    } catch (error: any) {
-      Alert.alert(
-        'Gagal',
-        error.message || 'Gagal menyimpan deposit. Silakan coba lagi.',
-      );
-    } finally {
-      setIsSubmitting(false);
+      console.warn('[ScanResult] Supabase unavailable, using local state');
+      addPointsLocal(points, weightKg);
     }
+
+    Alert.alert(
+      'Deposit Berhasil!',
+      `+${points} Eco-Points telah ditambahkan.\nKategori: ${
+        selectedCategory!.name
+      }\nBin: ${
+        availableBins.find(b => b.id === selectedBinId)?.name || selectedBinId
+      }`,
+      [
+        {
+          text: 'OK',
+          onPress: () => {
+            navigation.popToTop?.();
+            navigation.getParent()?.navigate('HomeTab');
+          },
+        },
+      ],
+    );
+    setIsSubmitting(false);
   };
 
   const matchedCat = selectedCategory;
@@ -286,9 +426,14 @@ export function ScanResultScreen() {
   const weight = matchedCat ? calculateEstimatedPoints(matchedCat).weightKg : 0;
   const selectedBin = availableBins.find(b => b.id === selectedBinId);
 
+  console.log('🚀 ~ ScanResultScreen ~ isWaitingSensor:', isWaitingSensor);
   return (
     <View style={styles.container}>
       <LoadingOverlay visible={isSubmitting} message="Menyimpan deposit..." />
+      <LoadingOverlay
+        visible={isWaitingSensor}
+        message="Menunggu sensor Smart Netbin..."
+      />
       <ScrollView>
         {matchedCat && (
           <ScanResultCard
@@ -371,15 +516,26 @@ export function ScanResultScreen() {
         )}
 
         <View style={styles.buttonContainer}>
-          <TouchableOpacity
-            style={[
-              styles.confirmButton,
-              (!selectedCategory || !selectedBinId) && styles.disabledButton,
-            ]}
-            onPress={handleConfirm}
-            disabled={!selectedCategory || !selectedBinId || isSubmitting}>
-            <Text style={styles.confirmText}>Konfirmasi Deposit</Text>
-          </TouchableOpacity>
+          {isWaitingSensor ? (
+            <View style={styles.waitingContainer}>
+              <Text style={styles.waitingText}>
+                Menunggu verifikasi sensor...
+              </Text>
+              <Text style={styles.waitingSubtext}>
+                Masukkan sampah ke Smart Netbin
+              </Text>
+            </View>
+          ) : (
+            <TouchableOpacity
+              style={[
+                styles.confirmButton,
+                (!selectedCategory || !selectedBinId) && styles.disabledButton,
+              ]}
+              onPress={handleConfirm}
+              disabled={!selectedCategory || !selectedBinId || isSubmitting}>
+              <Text style={styles.confirmText}>Konfirmasi Deposit</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </ScrollView>
     </View>
@@ -445,4 +601,14 @@ const styles = StyleSheet.create({
   },
   disabledButton: {backgroundColor: '#BDBDBD'},
   confirmText: {fontSize: 16, color: '#fff', fontWeight: '600'},
+  waitingContainer: {
+    backgroundColor: '#E3F2FD',
+    padding: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#2196F3',
+  },
+  waitingText: {fontSize: 16, color: '#1565C0', fontWeight: '600'},
+  waitingSubtext: {fontSize: 13, color: '#1976D2', marginTop: 4},
 });

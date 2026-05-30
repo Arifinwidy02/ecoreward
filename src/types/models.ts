@@ -1,4 +1,4 @@
-import { BinStatus, TransactionStatus, TransactionType, VerificationMethod, RewardType, NotificationType, WasteCategoryName } from './enums';
+import { BinStatus, DepositIntentStatus, TransactionStatus, TransactionType, VerificationMethod, RewardType, NotificationType, WasteCategoryName } from './enums';
 
 export interface Profile {
   id: string;
@@ -23,6 +23,7 @@ export interface WasteCategory {
 
 export interface SmartNetbin {
   id: string;
+  hardware_id: string | null;
   name: string;
   latitude: number;
   longitude: number;
@@ -31,6 +32,21 @@ export interface SmartNetbin {
   address: string | null;
   last_updated: string;
   created_at: string;
+}
+
+export interface DepositIntent {
+  id: string;
+  user_id: string;
+  bin_id: string;
+  category_id: string;
+  photo_url: string | null;
+  estimated_weight_kg: number | null;
+  max_expected_weight_kg: number | null;
+  status: DepositIntentStatus;
+  matched_transaction_id: string | null;
+  created_at: string;
+  matched_at: string | null;
+  expired_at: string | null;
 }
 
 export interface Transaction {

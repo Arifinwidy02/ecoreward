@@ -1,5 +1,6 @@
-import { supabase } from './supabase';
+import {supabase} from './supabase';
 import RNFS from 'react-native-fs';
+import {DepositIntent} from '../types/models';
 
 export interface SubmitScanParams {
   userId: string;
@@ -18,17 +19,36 @@ export interface SubmitScanResult {
   balanceAfter: number;
 }
 
-async function tryUploadPhoto(userId: string, photoUri: string): Promise<string | null> {
+export interface CreateDepositIntentParams {
+  userId: string;
+  binId: string;
+  categoryId: string;
+  estimatedWeightKg: number;
+  maxExpectedWeightKg: number;
+  photoUri: string;
+}
+
+async function tryUploadPhoto(
+  userId: string,
+  photoUri: string,
+): Promise<string | null> {
   try {
-    const actualPath = photoUri.startsWith('file://') ? photoUri.slice(7) : photoUri;
+    const actualPath = photoUri.startsWith('file://')
+      ? photoUri.slice(7)
+      : photoUri;
     const filePath = `waste-photos/${userId}/${Date.now()}.jpg`;
     const base64 = await RNFS.readFile(actualPath, 'base64');
     const bytes = base64ToBytes(base64);
-    const { error } = await supabase.storage
+    const {error} = await supabase.storage
       .from('waste-photos')
-      .upload(filePath, bytes as any, { contentType: 'image/jpeg', upsert: false });
+      .upload(filePath, bytes as any, {
+        contentType: 'image/jpeg',
+        upsert: false,
+      });
     if (error) throw error;
-    const { data: urlData } = supabase.storage.from('waste-photos').getPublicUrl(filePath);
+    const {data: urlData} = supabase.storage
+      .from('waste-photos')
+      .getPublicUrl(filePath);
     console.log('[ScanService] Photo uploaded:', urlData.publicUrl);
     return urlData.publicUrl;
   } catch (e: any) {
@@ -46,22 +66,69 @@ function base64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
-export async function submitScan(params: SubmitScanParams): Promise<SubmitScanResult> {
+export async function createDepositIntent(
+  params: CreateDepositIntentParams,
+): Promise<DepositIntent> {
+  const photoUrl = await tryUploadPhoto(params.userId, params.photoUri);
+
+  const {data, error} = await supabase
+    .from('deposit_intents')
+    .insert({
+      user_id: params.userId,
+      bin_id: params.binId,
+      category_id: params.categoryId,
+      photo_url: photoUrl,
+      estimated_weight_kg: params.estimatedWeightKg,
+      max_expected_weight_kg: params.maxExpectedWeightKg,
+      status: 'pending',
+    })
+    .select('*')
+    .single();
+
+  if (error) throw error;
+  console.log('[ScanService] Deposit intent created:', data.id);
+  return data as DepositIntent;
+}
+
+export async function pollDepositIntent(
+  intentId: string,
+): Promise<DepositIntent> {
+  const {data, error} = await supabase
+    .from('deposit_intents')
+    .select('*')
+    .eq('id', intentId)
+    .single();
+
+  if (error) throw error;
+  return data as DepositIntent;
+}
+
+export async function cancelDepositIntent(intentId: string): Promise<void> {
+  const {error} = await supabase
+    .from('deposit_intents')
+    .update({status: 'cancelled'})
+    .eq('id', intentId);
+
+  if (error) throw error;
+}
+
+export async function submitScan(
+  params: SubmitScanParams,
+): Promise<SubmitScanResult> {
   console.log('[ScanService] ======== submitScan START ========');
 
   const photoUrl = await tryUploadPhoto(params.userId, params.photoUri);
 
-  // RPC handles waste_categories upsert internally — no need to lookup category_id
   try {
     console.log('[ScanService] Trying submit_scan RPC...');
-    const { data, error } = await supabase.rpc('submit_scan', {
+    const {data, error} = await supabase.rpc('submit_scan', {
       p_user_id: params.userId,
       p_category: params.category,
       p_confidence: params.confidence,
       p_points_earned: params.pointsEarned,
       p_weight_kg: params.weightKg,
       p_photo_url: photoUrl,
-      p_bin_id: null,
+      p_bin_id: params.binId || null,
       p_category_id: null,
     });
 
